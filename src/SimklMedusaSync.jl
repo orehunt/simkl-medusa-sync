@@ -1,0 +1,285 @@
+module Simkl
+
+using HTTP
+using JSON
+using Dates: now
+using Base64
+
+const redirect_uri = Ref("urn:ietf:wg:oauth:2.0:oob")
+const simkl_oauth = "https://simkl.com/oauth/authorize"
+const simkl_pin = "https://api.simkl.com/oauth/pin"
+const simkl_all_items = "https://api.simkl.com/sync/all-items"
+
+const cache_path = Ref(get(ENV, "XDG_CACHE_HOME", "$(ENV["HOME"])/.cache"))
+const creds_path = Ref(joinpath(cache_path[], "simkl_creds.json"))
+const items_path = Ref(joinpath(cache_path[], "simkl_items.json"))
+const creds = IdDict{String, String}()
+merge!(creds, JSON.parse(read(creds_path[], String)))
+const access_token = Ref(get(creds, "access_token", ""))
+const headers = []
+
+@inline function tv_url(ids)
+    if "imdb" ∈ keys(ids)
+        "https://www.imdb.com/title/" * ids["imdb"]
+    elseif "tvdbslug" ∈ keys(ids)
+        "https://www.thetvdb.com/series/" * ids["tvdbslug"]
+    elseif "anidb" ∈ keys(ids)
+        "https://anidb.net/anime/" * ids["anidb"]
+    else
+        ""
+    end
+end
+
+@inline function simkl_url(type, show::String)
+    "https://simkl.com/" * type * "/" * show
+end
+
+function get_simkl_pin()
+    query = Dict("client_id" => creds["client_id"],
+                 "redirect_uri" => redirect_uri[])
+    res = HTTP.request("GET", simkl_pin, headers; query)
+    body = JSON.parse(String(res.body))
+    body["user_code"], body["verification_url"]
+end
+
+function get_simkl_token(code)
+    query = Dict("client_id" => creds["client_id"])
+    res = HTTP.request("GET", joinpath(simkl_pin, code), headers; query)
+    body = JSON.parse(String(res.body))
+    get(body, "access_token", "")
+end
+
+function simkl_set_headers!()
+    empty!(headers)
+    push!(headers, "Content-Type" => "application/json")
+    push!(headers, "Authorization" => "Bearer $(access_token[])")
+    push!(headers, "simkl-api-key" => creds["client_id"])
+end
+
+@doc "Checks if an ACCESS_TOKEN key is present in the file pointed by CREDS_PATH. If not present initiate
+a pin verification procedure."
+function simkl_auth()
+    token = ""
+    if isempty(get(creds, "access_token", ""))
+        code, url = get_simkl_pin()
+        display("Verify pin: $code at $url")
+        sl = 1
+        while true
+            token = get_simkl_token(code)
+            isempty(token) || break
+            display("token not yed found, sleeping for $sl...")
+            sleep(sl)
+            sl += 1
+        end
+        creds["code"] = code
+        creds["access_token"] = token
+        access_token[] = token
+        write(creds_path[], JSON.json(creds))
+        display("Saved new access token to $(creds_path[])")
+    else
+        display("Access token already available.")
+    end
+    simkl_set_headers!()
+end
+
+function simkl_fetch_all_items(type="", status=""; reset=false)
+    date_from = reset ? "" : get(creds, "date_from", "")
+    query = Dict()
+    prev_items = nothing
+    isempty(date_from) || begin
+	    query["date_from"] = date_from
+        isfile(items_path[]) && begin
+            prev_items = JSON.parse(read(items_path[], String))
+        end
+    end
+    simkl_set_headers!()
+    res = HTTP.request("GET", joinpath(simkl_all_items, type, status), headers; query)
+    if isnothing(prev_items)
+        items_str = String(res.body)
+        write(items_path[], items_str)
+        prev_items = JSON.parse(items_str)
+    else
+        items = JSON.parse(String(res.body))
+        if !isnothing(items)
+            merge!(prev_items, items)
+            @show prev_items
+            write(items_path[], JSON.json(prev_items))
+        end
+    end
+    creds["date_from"] = string(now())
+    write(creds_path[], JSON.json(creds))
+    prev_items
+end
+
+function simkl_get_all_items(update=false; reset=false, kwargs...)
+    if update || !isfile(items_path[])
+        simkl_fetch_all_items(;reset, kwargs...)
+    else
+	    JSON.parse(read(items_path[], String))
+    end
+end
+
+function simkl_get_shows(status="watching"; types = ["shows", "anime"])
+    all_items = simkl_get_all_items()
+    shows = []
+    for tp in types
+        for el in all_items[tp]
+            if el["status"] === status
+                push!(shows, el)
+            end
+        end
+    end
+    shows
+end
+
+function simkl_get_show_by_title(title; status="watching")
+    shows = simkl_get_shows(status)
+    for s in shows
+        s["show"]["title"] === title && return s
+    end
+end
+
+## MEDUSA ##
+
+const medusa_url = Ref("http://mbx:8081")
+const medusa_token = Ref("")
+const medusa_headers = []
+
+function medusa_set_token()
+    res = HTTP.request("POST", medusa_url[] * "/api/v2/authenticate")
+    medusa_token[] = JSON.parse(String(res.body))["token"]
+end
+
+function medusa_set_headers!()
+    empty!(medusa_headers)
+    push!(medusa_headers, "Content-Type" => "application/json")
+    push!(medusa_headers, "Authorization" => "Bearer $(medusa_token[])")
+end
+
+function medusa_auth()
+    medusa_set_token()
+    medusa_set_headers!()
+end
+
+@doc "ID should be a pair of for \"PROVIDER\" => ID "
+function medusa_add_series(id::Pair;
+                           # this quality means "all the 1080p version"
+                           quality=Dict("allowed" => [32, 128, 512], "preferred" => []),
+                           release=Dict("blacklist" => [], "whitelist" => []),
+                           lists=["series"],
+                           anime=false, scene=false,
+                           # skip past episodes
+                           status=5,
+                           # want future episodes
+                           status_after=3)
+    medusa_set_token()
+    medusa_set_headers!()
+    body = Dict{String, Any}("id" => Dict(id))
+    body["options"] = Dict("quality" => quality,
+                           "anime" => anime,
+                           "status" => status,
+                           "statusAfter" => status_after,
+                           "rootDir" => "/data/shows",
+                           "subtitles" => true,
+                           "scene" => scene,
+                           "seasonFolders" => true,
+                           "showLists" => lists,
+                           "release" => release,
+                           "lang" => "en")
+    HTTP.request("POST", medusa_url[] * "/api/v2/series", medusa_headers, JSON.json(body)) |>
+        x -> JSON.parse(String(x.body))
+end
+
+function medusa_remove_series(slug)
+    @show "deleting $slug"
+    HTTP.request("DELETE", medusa_url[] * "/api/v2/series/" * slug, medusa_headers)
+end
+
+@doc "Fetch medusa series (max 1000)."
+function medusa_get_shows(limit=1000)
+    query = Dict("limit" => limit)
+    HTTP.request("GET", medusa_url[] * "/api/v2/series", medusa_headers; query) |>
+        x -> JSON.parse(String(x.body))
+end
+
+function get_show_id(show)
+    ids = show["ids"]
+    k = keys(show["ids"])
+    # medusa doesn't want imdb as indexer
+    # "imdb" ∈ k && return "imdb" => ids["imdb"]
+    "tvdb" ∈ k && return "tvdb" => ids["tvdb"]
+    "tmdb" ∈ k && return "tmdb" => ids["tmdb"]
+    "anidb" ∈ k && return "imdb" => ids["anidb"]
+end
+
+@doc "Add all watching series to medusa."
+function simkl_to_medusa()
+	watching = simkl_get_shows("watching")
+    for item in watching
+        try
+            id = get_show_id(item["show"])
+            res = Simkl.medusa_add_series(id; anime=(id[1] === "anidb"))
+            display(res)
+        catch error
+            res = JSON.parse(String(error.response.body))
+            get(res, "error", "") === "Series already exist added" || display(res)
+        end
+    end
+end
+
+import Base.convert
+convert(::Type{Pair{String, String}}, val::Pair{String, Any}) = val[1] => string(val[2])
+
+@doc "Remove all medusa series that are not in simkl the watching list."
+function medusa_from_simkl()
+    simkl_shows = simkl_get_shows("watching")
+    simkl_ids = Set([hash(convert(Pair{String, String}, idpair)) for show in simkl_shows for idpair in show["show"]["ids"]])
+    medusa_shows = medusa_get_shows()
+    allowed = Set(["tvdb", "anidb", "tmdb", "imdb"])
+    for show in medusa_shows
+        ids = show["id"]
+        present = false
+        for id in ids
+            if hash(convert(Pair{String, String}, id)) ∈ simkl_ids
+                present = true
+                break
+            end
+        end
+        # !present && (display("gotta remove: " * show["title"]); display(show["id"]))
+        !present && (medusa_remove_series(show["id"]["slug"]))
+    end
+end
+
+function medusa_remove_duplicates()
+    medusa_shows = medusa_get_shows()
+    processed = Set{String}()
+    for show in medusa_shows
+        title = show["title"]
+        if title ∉ processed
+            push!(processed, title)
+        else
+            medusa_remove_series(show["id"]["slug"])
+        end
+    end
+end
+
+function run()
+    # ensure dirs exist
+    for d in (cache_path, creds_path, items_path)
+        mkpath(dirname(d[]))
+    end
+    simkl_auth()
+    medusa_auth()
+
+    while true
+        simkl_get_all_items(update=true)
+        # first remove non present series
+        medusa_from_simkl()
+        # then add new series from simkl
+        simkl_to_medusa()
+        # process once every 8 hours by default
+        sleep(get(ENV, "SYNC_SLEEP", 60 * 60 * 8))
+    end
+end
+
+end
