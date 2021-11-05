@@ -1,4 +1,4 @@
-module Simkl
+module SimklMedusaSync
 
 using HTTP
 using JSON
@@ -14,7 +14,7 @@ const cache_path = Ref(get(ENV, "XDG_CACHE_HOME", "$(ENV["HOME"])/.cache"))
 const creds_path = Ref(joinpath(cache_path[], "simkl_creds.json"))
 const items_path = Ref(joinpath(cache_path[], "simkl_items.json"))
 const creds = IdDict{String, String}()
-merge!(creds, JSON.parse(read(creds_path[], String)))
+isfile(creds_path[]) && merge!(creds, JSON.parse(read(creds_path[], String)))
 const access_token = Ref(get(creds, "access_token", ""))
 const headers = []
 
@@ -35,8 +35,12 @@ end
 end
 
 function get_simkl_pin()
-    query = Dict("client_id" => creds["client_id"],
+    try
+        query = Dict("client_id" => creds["client_id"],
                  "redirect_uri" => redirect_uri[])
+    catch KeyError
+        throw("client_id or redirect_uri not found, make sure json config at $(creds_path[]) is valid.")
+    end
     res = HTTP.request("GET", simkl_pin, headers; query)
     body = JSON.parse(String(res.body))
     body["user_code"], body["verification_url"]
@@ -62,12 +66,12 @@ function simkl_auth()
     token = ""
     if isempty(get(creds, "access_token", ""))
         code, url = get_simkl_pin()
-        display("Verify pin: $code at $url")
+        @info "Verify pin: $code at $url"
         sl = 1
         while true
             token = get_simkl_token(code)
             isempty(token) || break
-            display("token not yed found, sleeping for $sl...")
+            @info "token not yed found, sleeping for $sl..."
             sleep(sl)
             sl += 1
         end
@@ -75,9 +79,9 @@ function simkl_auth()
         creds["access_token"] = token
         access_token[] = token
         write(creds_path[], JSON.json(creds))
-        display("Saved new access token to $(creds_path[])")
+        @info "Saved new access token to $(creds_path[])"
     else
-        display("Access token already available.")
+        @info "Access token already available."
     end
     simkl_set_headers!()
 end
@@ -102,7 +106,6 @@ function simkl_fetch_all_items(type="", status=""; reset=false)
         items = JSON.parse(String(res.body))
         if !isnothing(items)
             merge!(prev_items, items)
-            @show prev_items
             write(items_path[], JSON.json(prev_items))
         end
     end
@@ -141,7 +144,7 @@ end
 
 ## MEDUSA ##
 
-const medusa_url = Ref("http://mbx:8081")
+const medusa_url = Ref(get(ENV, "MEDUSA_URL", "http://localhost:8081"))
 const medusa_token = Ref("")
 const medusa_headers = []
 
@@ -172,8 +175,6 @@ function medusa_add_series(id::Pair;
                            status=5,
                            # want future episodes
                            status_after=3)
-    medusa_set_token()
-    medusa_set_headers!()
     body = Dict{String, Any}("id" => Dict(id))
     body["options"] = Dict("quality" => quality,
                            "anime" => anime,
@@ -191,7 +192,7 @@ function medusa_add_series(id::Pair;
 end
 
 function medusa_remove_series(slug)
-    @show "deleting $slug"
+    @info "removing $(slug) from Medusa."
     HTTP.request("DELETE", medusa_url[] * "/api/v2/series/" * slug, medusa_headers)
 end
 
@@ -209,7 +210,9 @@ function get_show_id(show)
     # "imdb" ∈ k && return "imdb" => ids["imdb"]
     "tvdb" ∈ k && return "tvdb" => ids["tvdb"]
     "tmdb" ∈ k && return "tmdb" => ids["tmdb"]
-    "anidb" ∈ k && return "imdb" => ids["anidb"]
+    "anidb" ∈ k && return "anidb" => ids["anidb"]
+    @info "No valid id found for $(show["title"])"
+    nothing
 end
 
 @doc "Add all watching series to medusa."
@@ -218,11 +221,14 @@ function simkl_to_medusa()
     for item in watching
         try
             id = get_show_id(item["show"])
-            res = Simkl.medusa_add_series(id; anime=(id[1] === "anidb"))
-            display(res)
+            if !isnothing(id)
+                res = medusa_add_series(id; anime=(id[1] === "anidb"))
+                @info "Adding $(item["show"]["title"]) to Medusa."
+            end
         catch error
+            @debug hasfield(error, :response) || error
             res = JSON.parse(String(error.response.body))
-            get(res, "error", "") === "Series already exist added" || display(res)
+            get(res, "error", "") === "Series already exist added" || @info res, item["show"]["title"]
         end
     end
 end
@@ -272,6 +278,7 @@ function run()
     medusa_auth()
 
     while true
+        @info "Updating symkl list..."
         simkl_get_all_items(update=true)
         # first remove non present series
         medusa_from_simkl()
@@ -281,5 +288,7 @@ function run()
         sleep(get(ENV, "SYNC_SLEEP", 60 * 60 * 8))
     end
 end
+
+precompile(run, ())
 
 end
