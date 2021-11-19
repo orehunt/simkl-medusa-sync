@@ -241,6 +241,10 @@ function medusa_from_simkl()
     simkl_shows = simkl_get_shows("watching")
     simkl_ids = Set([hash(convert(Pair{String, String}, idpair)) for show in simkl_shows for idpair in show["show"]["ids"]])
     medusa_shows = medusa_get_shows()
+    "error" ∈ medusa_shows && begin
+        medusa_auth()
+        medusa_shows = medusa_get_shows()
+    end
     allowed = Set(["tvdb", "anidb", "tmdb", "imdb"])
     for show in medusa_shows
         ids = show["id"]
@@ -279,7 +283,7 @@ function run()
 
     while true
         @info "Updating symkl list..."
-        simkl_get_all_items(update=true)
+        simkl_get_all_items(true)
         # first remove non present series
         medusa_from_simkl()
         # then add new series from simkl
