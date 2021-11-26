@@ -86,6 +86,23 @@ function simkl_auth()
     simkl_set_headers!()
 end
 
+function simkl_query_items(query ;type, status, backoff=0)
+    sleep(backoff)
+    simkl_set_headers!()
+    try
+        res = HTTP.request("GET", joinpath(simkl_all_items, type, status), headers; query)
+        items_str = String(res.body)
+        items = JSON.parse(items_str)
+    catch
+        backoff =  (backoff + 1) * 2
+        @warn "Simkl query failed, retrying after $backoff"
+        items_str, items = simkl_query_items(query; type, status, backoff)
+    finally
+        return items_str, items
+    end
+end
+
+
 function simkl_fetch_all_items(type="", status=""; reset=false)
     date_from = reset ? "" : get(creds, "date_from", "")
     query = Dict()
@@ -96,16 +113,22 @@ function simkl_fetch_all_items(type="", status=""; reset=false)
             prev_items = JSON.parse(read(items_path[], String))
         end
     end
-    simkl_set_headers!()
-    res = HTTP.request("GET", joinpath(simkl_all_items, type, status), headers; query)
+    items_str, items = simkl_query_items(query; type, status)
     if isnothing(prev_items)
-        items_str = String(res.body)
         write(items_path[], items_str)
         prev_items = JSON.parse(items_str)
     else
-        items = JSON.parse(String(res.body))
         if !isnothing(items)
-            merge!(prev_items, items)
+            # merge shows,movies, and animes separately to not remove pre existing ones
+            # since merge! overrides top level keys
+            # NOTE: we also assume that items are never removed from simkl, because
+            # merging overrides existing ones, but doesn't remove..., and since we don't
+            # fetch the whole list all the times, we don't know which items would be removed
+            # from simkl
+            for (k, d) in prev_items
+                merge!(d, items[k])
+            end
+            @show prev_items
             write(items_path[], JSON.json(prev_items))
         end
     end
@@ -115,7 +138,9 @@ function simkl_fetch_all_items(type="", status=""; reset=false)
 end
 
 function simkl_get_all_items(update=false; reset=false, kwargs...)
-    if update || !isfile(items_path[])
+    first_time = !isfile(items_path[])
+    reset = isnothing(reset) ? first_time : reset
+    if update || first_time
         simkl_fetch_all_items(;reset, kwargs...)
     else
 	    JSON.parse(read(items_path[], String))
@@ -211,6 +236,7 @@ function get_show_id(show)
     "tvdb" ∈ k && return "tvdb" => ids["tvdb"]
     "tmdb" ∈ k && return "tmdb" => ids["tmdb"]
     "anidb" ∈ k && return "anidb" => ids["anidb"]
+    "mal" ∈ k && return "mal" => ids["mal"]
     @info "No valid id found for $(show["title"])"
     nothing
 end
@@ -218,19 +244,23 @@ end
 @doc "Add all watching series to medusa."
 function simkl_to_medusa()
 	watching = simkl_get_shows("watching")
+    id = ""
+    added = 0
     for item in watching
         try
             id = get_show_id(item["show"])
             if !isnothing(id)
-                res = medusa_add_series(id; anime=(id[1] === "anidb"))
-                @info "Adding $(item["show"]["title"]) to Medusa."
+                res = medusa_add_series(id; anime=(id[1] ∈ Set(("anidb", "mal"))))
+                added += 1
+                @debug "Adding $(item["show"]["title"]) to Medusa."
             end
         catch error
             @debug hasfield(error, :response) || error
             res = JSON.parse(String(error.response.body))
-            get(res, "error", "") === "Series already exist added" || @info res, item["show"]["title"]
+            get(res, "error", "") === "Series already exist added" || @info res, id, item["show"]["ids"]
         end
     end
+    @info display("Added $added shows to medusa.")
 end
 
 import Base.convert
@@ -240,6 +270,7 @@ convert(::Type{Pair{String, String}}, val::Pair{String, Any}) = val[1] => string
 function medusa_from_simkl()
     simkl_shows = simkl_get_shows("watching")
     simkl_ids = Set([hash(convert(Pair{String, String}, idpair)) for show in simkl_shows for idpair in show["show"]["ids"]])
+    @assert !isempty(simkl_ids)
     medusa_shows = medusa_get_shows()
     "error" ∈ medusa_shows && begin
         medusa_auth()
