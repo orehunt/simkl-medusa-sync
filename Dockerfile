@@ -6,7 +6,6 @@ VOLUME /config
 ENV XDG_CACHE_HOME=/config
 
 ADD . /project/
-
 RUN julia --project=. build.jl
 
 CMD julia --project=. run.jl

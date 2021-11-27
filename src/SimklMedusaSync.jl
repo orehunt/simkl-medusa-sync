@@ -89,52 +89,59 @@ end
 function simkl_query_items(query ;type, status, backoff=0)
     sleep(backoff)
     simkl_set_headers!()
+    items = nothing
     try
         res = HTTP.request("GET", joinpath(simkl_all_items, type, status), headers; query)
-        items_str = String(res.body)
-        items = JSON.parse(items_str)
+        items = JSON.parse(String(res.body))
     catch
         backoff =  (backoff + 1) * 2
         @warn "Simkl query failed, retrying after $backoff"
-        items_str, items = simkl_query_items(query; type, status, backoff)
-    finally
-        return items_str, items
+        items = simkl_query_items(query; type, status, backoff)
     end
+    items
 end
 
 
 function simkl_fetch_all_items(type="", status=""; reset=false)
     date_from = reset ? "" : get(creds, "date_from", "")
     query = Dict()
-    prev_items = nothing
+    prev_items_dict = nothing
     isempty(date_from) || begin
 	    query["date_from"] = date_from
         isfile(items_path[]) && begin
-            prev_items = JSON.parse(read(items_path[], String))
+            prev_items_dict = JSON.parse(read(items_path[], String))
         end
     end
-    items_str, items = simkl_query_items(query; type, status)
-    if isnothing(prev_items)
-        write(items_path[], items_str)
-        prev_items = JSON.parse(items_str)
+    items = simkl_query_items(query; type, status)
+    items_dict = Dict()
+    # convert the api response into a proper dict where each key is a show,
+    # (instead of a vector)
+    if !isnothing(items)
+        for (k, d) in items
+            ik = (k === "anime" || k === "shows") ? "show" : "movie"
+            items_dict[k] = Dict(i[ik]["title"] => i for i in d)
+        end
+    end
+    if isnothing(prev_items_dict)
+        write(items_path[], JSON.json(items_dict))
+        prev_items_dict = items_dict
     else
-        if !isnothing(items)
+        if !isnothing(items) || "error" ∉ keys(items_dict)
             # merge shows,movies, and animes separately to not remove pre existing ones
             # since merge! overrides top level keys
             # NOTE: we also assume that items are never removed from simkl, because
             # merging overrides existing ones, but doesn't remove..., and since we don't
             # fetch the whole list all the times, we don't know which items would be removed
             # from simkl
-            for (k, d) in prev_items
-                merge!(d, items[k])
+            for (k, d) in prev_items_dict
+                k ∈ keys(items_dict) && merge!(d, items_dict[k])
             end
-            @show prev_items
-            write(items_path[], JSON.json(prev_items))
+            write(items_path[], JSON.json(prev_items_dict))
         end
     end
     creds["date_from"] = string(now())
     write(creds_path[], JSON.json(creds))
-    prev_items
+    prev_items_dict
 end
 
 function simkl_get_all_items(update=false; reset=false, kwargs...)
@@ -260,7 +267,7 @@ function simkl_to_medusa()
             get(res, "error", "") === "Series already exist added" || @info res, id, item["show"]["ids"]
         end
     end
-    @info display("Added $added shows to medusa.")
+    @info "Added $added shows to medusa."
 end
 
 import Base.convert
