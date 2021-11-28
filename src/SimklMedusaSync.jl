@@ -242,8 +242,8 @@ function get_show_id(show)
     # "imdb" ∈ k && return "imdb" => ids["imdb"]
     "tvdb" ∈ k && return "tvdb" => ids["tvdb"]
     "tmdb" ∈ k && return "tmdb" => ids["tmdb"]
-    "anidb" ∈ k && return "anidb" => ids["anidb"]
     "mal" ∈ k && return "mal" => ids["mal"]
+    "anidb" ∈ k && return "anidb" => ids["anidb"]
     @info "No valid id found for $(show["title"])"
     nothing
 end
