@@ -71,7 +71,7 @@ function simkl_auth()
         while true
             token = get_simkl_token(code)
             isempty(token) || break
-            @info "token not yed found, sleeping for $sl..."
+            @info "token not yet found, sleeping for $sl..."
             sleep(sl)
             sl += 1
         end
@@ -144,7 +144,7 @@ function simkl_fetch_all_items(type="", status=""; reset=false)
     prev_items_dict
 end
 
-function simkl_get_all_items(update=false; reset=false, kwargs...)
+function simkl_get_all_items(update=false; reset=nothing, kwargs...)
     first_time = !isfile(items_path[])
     reset = isnothing(reset) ? first_time : reset
     if update || first_time
@@ -158,7 +158,7 @@ function simkl_get_shows(status="watching"; types = ["shows", "anime"])
     all_items = simkl_get_all_items()
     shows = []
     for tp in types
-        for el in all_items[tp]
+        for (_, el) in all_items[tp]
             if el["status"] === status
                 push!(shows, el)
             end
