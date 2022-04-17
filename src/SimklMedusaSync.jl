@@ -188,7 +188,7 @@ end
 function medusa_set_headers!()
     empty!(medusa_headers)
     push!(medusa_headers, "Content-Type" => "application/json")
-    push!(medusa_headers, "Authorization" => "Bearer $(medusa_token[])")
+    push!(medusa_headers, "x-auth" => "Bearer $(medusa_token[])")
 end
 
 function medusa_auth()
@@ -235,18 +235,27 @@ function medusa_get_shows(limit=1000)
         x -> JSON.parse(String(x.body))
 end
 
-function get_show_id(show)
+const anime_ids = ("mal", "ann", "anidb", "allcin", "offjp", "wikijp")
+function isanime(ids)
+    for ai in anime_ids
+        ai ∈ ids && return true
+    end
+    return false
+end
+
+function show_id(show)
     ids = show["ids"]
     k = keys(show["ids"])
-    # medusa doesn't want imdb as indexer
-    # "imdb" ∈ k && return "imdb" => ids["imdb"]
+    "imdb" ∈ k && return "imdb" => split(ids["imdb"], "tt")[2]
     "tvdb" ∈ k && return "tvdb" => ids["tvdb"]
     "tmdb" ∈ k && return "tmdb" => ids["tmdb"]
-    "mal" ∈ k && return "mal" => ids["mal"]
     "anidb" ∈ k && return "anidb" => ids["anidb"]
+    "mal" ∈ k && return "mal" => ids["mal"]
     @info "No valid id found for $(show["title"])"
-    nothing
+    "" => ""
 end
+
+get_show_id(show) = (show_id(show), isanime(keys(show["ids"])))
 
 @doc "Add all watching series to medusa."
 function simkl_to_medusa()
@@ -255,16 +264,19 @@ function simkl_to_medusa()
     added = 0
     for item in watching
         try
-            id = get_show_id(item["show"])
+            (id, anime) = get_show_id(item["show"])
             if !isnothing(id)
-                res = medusa_add_series(id; anime=(id[1] ∈ Set(("anidb", "mal"))))
+                res = medusa_add_series(id; anime)
                 added += 1
                 @debug "Adding $(item["show"]["title"]) to Medusa."
             end
         catch error
-            @debug hasfield(error, :response) || error
-            res = JSON.parse(String(error.response.body))
-            get(res, "error", "") === "Series already exist added" || @info res, id, item["show"]["ids"]
+            if hasfield(typeof(error), :response)
+                res = JSON.parse(String(error.response.body))
+                get(res, "error", "") === "Series already exist added" || @info res, id, item["show"]["ids"]
+            else
+                @debug error
+            end
         end
     end
     @info "Added $added shows to medusa."
@@ -323,10 +335,13 @@ function run()
         @info "Updating symkl list..."
         simkl_get_all_items(true)
         # first remove non present series
+        @info "medusa from simkl..."
         medusa_from_simkl()
         # then add new series from simkl
+        @info "simkl to medusa..."
         simkl_to_medusa()
         # process once every 8 hours by default
+        @info "sleeping..."
         sleep(get(ENV, "SYNC_SLEEP", 60 * 60 * 8))
     end
 end
