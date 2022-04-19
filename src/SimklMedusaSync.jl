@@ -243,6 +243,7 @@ function isanime(ids)
     return false
 end
 
+const indexer_order = ("imdb", "tvdb", "tmdb", "anidb", "mal")
 function show_id(show)
     ids = show["ids"]
     k = keys(show["ids"])
@@ -310,26 +311,46 @@ function medusa_from_simkl()
     end
 end
 
-function medusa_remove_duplicates()
-    medusa_shows = medusa_get_shows()
-    processed = Set{String}()
-    for show in medusa_shows
-        title = show["title"]
-        if title ∉ processed
-            push!(processed, title)
-        else
-            medusa_remove_series(show["id"]["slug"])
-        end
-    end
-end
-
-function run()
+function setup()
     # ensure dirs exist
     for d in (cache_path, creds_path, items_path)
         mkpath(dirname(d[]))
     end
     simkl_auth()
     medusa_auth()
+end
+
+function medusa_remove_duplicates()
+    setup()
+    medusa_shows = medusa_get_shows()
+    shows_by_title = Dict{String, Dict{String, Dict}}()
+    for show in medusa_shows
+        title = show["title"]
+        idx = show["indexer"]
+        if title ∉ keys(shows_by_title)
+            shows_by_title[title] = Dict()
+        end
+        shows_by_title[title][idx] = show
+    end
+    for (_, dups) in shows_by_title
+        if length(dups) > 1
+            # keep one of the duplicates, according to the preferred indexer
+            for idx in indexer_order
+                if idx ∈ keys(dups)
+                    delete!(dups, idx)
+                    break
+                end
+            end
+            # remove the rest
+            for du in dups
+                medusa_remove_series(du["id"]["slug"])
+            end
+        end
+    end
+end
+
+function run()
+    setup()
 
     while true
         @info "Updating symkl list..."
