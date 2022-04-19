@@ -342,7 +342,7 @@ function medusa_remove_duplicates()
                 end
             end
             # remove the rest
-            for du in dups
+            for du in values(dups)
                 medusa_remove_series(du["id"]["slug"])
             end
         end
