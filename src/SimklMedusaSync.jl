@@ -13,7 +13,7 @@ const simkl_all_items = "https://api.simkl.com/sync/all-items"
 const cache_path = Ref(get(ENV, "XDG_CACHE_HOME", "$(ENV["HOME"])/.cache"))
 const creds_path = Ref(joinpath(cache_path[], "simkl_creds.json"))
 const items_path = Ref(joinpath(cache_path[], "simkl_items.json"))
-const creds = IdDict{String, String}()
+const creds = IdDict{String,String}()
 isfile(creds_path[]) && merge!(creds, JSON.parse(read(creds_path[], String)))
 const access_token = Ref(get(creds, "access_token", ""))
 const headers = []
@@ -37,7 +37,7 @@ end
 function get_simkl_pin()
     try
         query = Dict("client_id" => creds["client_id"],
-                 "redirect_uri" => redirect_uri[])
+            "redirect_uri" => redirect_uri[])
     catch KeyError
         throw("client_id or redirect_uri not found, make sure json config at $(creds_path[]) is valid.")
     end
@@ -86,7 +86,7 @@ function simkl_auth()
     simkl_set_headers!()
 end
 
-function simkl_query_items(query ;type, status, backoff=0)
+function simkl_query_items(query; type, status, backoff = 0)
     sleep(backoff)
     simkl_set_headers!()
     items = nothing
@@ -94,7 +94,7 @@ function simkl_query_items(query ;type, status, backoff=0)
         res = HTTP.request("GET", joinpath(simkl_all_items, type, status), headers; query)
         items = JSON.parse(String(res.body))
     catch
-        backoff =  (backoff + 1) * 2
+        backoff = (backoff + 1) * 2
         @warn "Simkl query failed, retrying after $backoff"
         items = simkl_query_items(query; type, status, backoff)
     end
@@ -102,12 +102,12 @@ function simkl_query_items(query ;type, status, backoff=0)
 end
 
 
-function simkl_fetch_all_items(type="", status=""; reset=false)
+function simkl_fetch_all_items(type = "", status = ""; reset = false)
     date_from = reset ? "" : get(creds, "date_from", "")
     query = Dict()
     prev_items_dict = nothing
     isempty(date_from) || begin
-	    query["date_from"] = date_from
+        query["date_from"] = date_from
         isfile(items_path[]) && begin
             prev_items_dict = JSON.parse(read(items_path[], String))
         end
@@ -144,17 +144,17 @@ function simkl_fetch_all_items(type="", status=""; reset=false)
     prev_items_dict
 end
 
-function simkl_get_all_items(update=false; reset=nothing, kwargs...)
+function simkl_get_all_items(update = false; reset = nothing, kwargs...)
     first_time = !isfile(items_path[])
     reset = isnothing(reset) ? first_time : reset
     if update || first_time
-        simkl_fetch_all_items(;reset, kwargs...)
+        simkl_fetch_all_items(; reset, kwargs...)
     else
-	    JSON.parse(read(items_path[], String))
+        JSON.parse(read(items_path[], String))
     end
 end
 
-function simkl_get_shows(status="watching"; types = ["shows", "anime"])
+function simkl_get_shows(status = "watching"; types = ["shows", "anime"])
     all_items = simkl_get_all_items()
     shows = []
     for tp in types
@@ -167,7 +167,7 @@ function simkl_get_shows(status="watching"; types = ["shows", "anime"])
     shows
 end
 
-function simkl_get_show_by_title(title; status="watching")
+function simkl_get_show_by_title(title; status = "watching")
     shows = simkl_get_shows(status)
     for s in shows
         s["show"]["title"] === title && return s
@@ -198,29 +198,29 @@ end
 
 @doc "ID should be a pair of for \"PROVIDER\" => ID "
 function medusa_add_series(id::Pair;
-                           # this quality means "all the 1080p version"
-                           quality=Dict("allowed" => [32, 128, 512], "preferred" => []),
-                           release=Dict("blacklist" => [], "whitelist" => []),
-                           lists=["series"],
-                           anime=false, scene=false,
-                           # skip past episodes
-                           status=5,
-                           # want future episodes
-                           status_after=3)
-    body = Dict{String, Any}("id" => Dict(id))
+    # this quality means "all the 1080p version"
+    quality = Dict("allowed" => [32, 128, 512], "preferred" => []),
+    release = Dict("blacklist" => [], "whitelist" => []),
+    lists = ["series"],
+    anime = false, scene = false,
+    # skip past episodes
+    status = 5,
+    # want future episodes
+    status_after = 3)
+    body = Dict{String,Any}("id" => Dict(id))
     body["options"] = Dict("quality" => quality,
-                           "anime" => anime,
-                           "status" => status,
-                           "statusAfter" => status_after,
-                           "rootDir" => "/data/shows",
-                           "subtitles" => true,
-                           "scene" => scene,
-                           "seasonFolders" => true,
-                           "showLists" => lists,
-                           "release" => release,
-                           "lang" => "en")
+        "anime" => anime,
+        "status" => status,
+        "statusAfter" => status_after,
+        "rootDir" => "/data/shows",
+        "subtitles" => true,
+        "scene" => scene,
+        "seasonFolders" => true,
+        "showLists" => lists,
+        "release" => release,
+        "lang" => "en")
     HTTP.request("POST", medusa_url[] * "/api/v2/series", medusa_headers, JSON.json(body)) |>
-        x -> JSON.parse(String(x.body))
+    x -> JSON.parse(String(x.body))
 end
 
 function medusa_remove_series(slug)
@@ -229,10 +229,10 @@ function medusa_remove_series(slug)
 end
 
 @doc "Fetch medusa series (max 1000)."
-function medusa_get_shows(limit=1000)
+function medusa_get_shows(limit = 1000)
     query = Dict("limit" => limit)
     HTTP.request("GET", medusa_url[] * "/api/v2/series", medusa_headers; query) |>
-        x -> JSON.parse(String(x.body))
+    x -> JSON.parse(String(x.body))
 end
 
 const anime_ids = ("mal", "ann", "anidb", "allcin", "offjp", "wikijp")
@@ -243,24 +243,48 @@ function isanime(ids)
     return false
 end
 
+@inline imdb(ids) = "imdb" => split(string(ids["imdb"]), "tt")[2]
+@inline tvdb(ids) = "tvdb" => ids["tvdb"]
+@inline tmdb(ids) = "tmdb" => ids["tmdb"]
+@inline anidb(ids) = "anidb" => ids["anidb"]
+@inline mal(ids) = "mal" => ids["mal"]
+
 const indexer_order = ("imdb", "tvdb", "tmdb", "anidb", "mal")
 function show_id(show)
     ids = show["ids"]
     k = keys(show["ids"])
-    "imdb" ∈ k && return "imdb" => split(ids["imdb"], "tt")[2]
-    "tvdb" ∈ k && return "tvdb" => ids["tvdb"]
-    "tmdb" ∈ k && return "tmdb" => ids["tmdb"]
-    "anidb" ∈ k && return "anidb" => ids["anidb"]
-    "mal" ∈ k && return "mal" => ids["mal"]
+    "imdb" ∈ k && return imdb(ids)
+    "tvdb" ∈ k && return tvdb(ids)
+    "tmdb" ∈ k && return tmdb(ids)
+    "anidb" ∈ k && return anidb(ids)
+    "mal" ∈ k && return mal(ids)
     @info "No valid id found for $(show["title"])"
     "" => ""
+end
+
+import Base.convert
+convert(::Type{Pair{String,String}}, val::Pair{String,Any}) = val[1] => string(val[2])
+convert(::Type{Pair{String,String}}, val::Pair{String,Int64}) = val[1] => string(val[2])
+function indexer_id(indexer::String, ids::Dict)
+    try
+        f = getfield(SimklMedusaSync, Symbol(indexer))
+        idpair::Pair{String, String} = convert(Pair{String, String}, f(ids))
+        hash(idpair)
+    catch
+        (exc, bt) = current_exceptions()[1]
+        if typeof(exc) ∉ (UndefVarError, BoundsError, MethodError)
+            showerror(stdout, exc ,bt)
+        end
+        idpair::Pair{String, String} = indexer => string(ids[indexer])
+        hash(idpair)
+    end
 end
 
 get_show_id(show) = (show_id(show), isanime(keys(show["ids"])))
 
 @doc "Add all watching series to medusa."
 function simkl_to_medusa()
-	watching = simkl_get_shows("watching")
+    watching = simkl_get_shows("watching")
     id = ""
     added = 0
     for item in watching
@@ -283,31 +307,44 @@ function simkl_to_medusa()
     @info "Added $added shows to medusa."
 end
 
-import Base.convert
-convert(::Type{Pair{String, String}}, val::Pair{String, Any}) = val[1] => string(val[2])
 
 @doc "Remove all medusa series that are not in simkl the watching list."
 function medusa_from_simkl()
+    local medusa_shows
     simkl_shows = simkl_get_shows("watching")
-    simkl_ids = Set([hash(convert(Pair{String, String}, idpair)) for show in simkl_shows for idpair in show["show"]["ids"]])
+    simkl_ids = Set{UInt}()
+    for show in simkl_shows
+        ids = show["show"]["ids"]
+        for idpair in ids
+            # if "imdb" in keys(ids)
+            #     display("adding " * show["show"]["title"])
+            #     display(ids["imdb"])
+            #     display(indexer_id(idpair[1], ids))
+            # end
+            push!(simkl_ids, indexer_id(idpair[1], ids))
+        end
+    end
     @assert !isempty(simkl_ids)
     medusa_shows = medusa_get_shows()
     "error" ∈ medusa_shows && begin
         medusa_auth()
         medusa_shows = medusa_get_shows()
     end
-    allowed = Set(["tvdb", "anidb", "tmdb", "imdb"])
     for show in medusa_shows
         ids = show["id"]
         present = false
         for id in ids
-            if hash(convert(Pair{String, String}, id)) ∈ simkl_ids
+            if indexer_id(id[1], ids) ∈ simkl_ids
                 present = true
                 break
             end
         end
-        # !present && (display("gotta remove: " * show["title"]); display(show["id"]))
-        !present && (medusa_remove_series(show["id"]["slug"]))
+        if !present
+            # display("gotta remove: " * show["title"])
+            # display(hash("imdb" => ids["imdb"]))
+            # display(ids)
+            medusa_remove_series(show["id"]["slug"])
+        end
     end
 end
 
@@ -323,7 +360,7 @@ end
 function medusa_remove_duplicates()
     setup()
     medusa_shows = medusa_get_shows()
-    shows_by_title = Dict{String, Dict{String, Dict}}()
+    shows_by_title = Dict{String,Dict{String,Dict}}()
     for show in medusa_shows
         title = show["title"]
         idx = show["indexer"]
