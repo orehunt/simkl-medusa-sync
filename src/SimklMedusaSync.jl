@@ -154,12 +154,12 @@ function simkl_get_all_items(update = false; reset = nothing, kwargs...)
     end
 end
 
-function simkl_get_shows(status = "watching"; types = ["shows", "anime"])
+function simkl_get_shows(types = ["shows", "anime"])
     all_items = simkl_get_all_items()
     shows = []
     for tp in types
         for (_, el) in all_items[tp]
-            if el["status"] === status
+            if el["status"] in ("watching", "plantowatch") && !isnothing(el["next_to_watch"])
                 push!(shows, el)
             end
         end
@@ -208,6 +208,9 @@ function medusa_add_series(id::Pair;
     # want future episodes
     status_after = 3)
     body = Dict{String,Any}("id" => Dict(id))
+    if anime
+        lists = ["anime"]
+    end
     body["options"] = Dict("quality" => quality,
         "anime" => anime,
         "status" => status,
@@ -250,6 +253,7 @@ end
 @inline mal(ids) = "mal" => ids["mal"]
 
 const indexer_order = ("imdb", "tvdb", "tmdb", "anidb", "mal")
+const indexers = Set(["imdb", "tvdb", "tmdb", "anidb", "mal"])
 function show_id(show)
     ids = show["ids"]
     k = keys(show["ids"])
@@ -268,37 +272,101 @@ convert(::Type{Pair{String,String}}, val::Pair{String,Int64}) = val[1] => string
 function indexer_id(indexer::String, ids::Dict)
     try
         f = getfield(SimklMedusaSync, Symbol(indexer))
-        idpair::Pair{String, String} = convert(Pair{String, String}, f(ids))
+        idpair::Pair{String,String} = convert(Pair{String,String}, f(ids))
         hash(idpair)
     catch
         (exc, bt) = current_exceptions()[1]
         if typeof(exc) ∉ (UndefVarError, BoundsError, MethodError)
-            showerror(stdout, exc ,bt)
+            showerror(stdout, exc, bt)
         end
-        idpair::Pair{String, String} = indexer => string(ids[indexer])
+        idpair::Pair{String,String} = indexer => string(ids[indexer])
         hash(idpair)
     end
 end
 
 get_show_id(show) = (show_id(show), isanime(keys(show["ids"])))
 
+using Dates
+function normalize_indexer(indexer)
+    lw_indexer = lowercase(indexer)
+    if startswith(lw_indexer, "tvdb")
+        "tvdb"
+    else
+        lw_indexer
+    end
+end
+function medusa_search_show(title)
+    query = Dict(
+        "query" => title,
+        "indexerId"=> 0
+    )
+    res = HTTP.request("GET",
+        medusa_url[] * "/api/v2/internal/searchIndexersForShowName",
+        medusa_headers; query) |>
+    x -> JSON.parse(String(x.body))
+    matches = []
+    for show in get(res, "results", Dict())
+        # exact show title
+        if show[5] == title
+            ## 6 == Date
+            push!(matches, (DateTime(show[6], ISODateFormat), show))
+        end
+    end
+    if length(matches) > 0
+        # sort by date and select the latest
+        sort!(matches)
+        entry = matches[end][2]
+        # Indexer, index
+        return normalize_indexer(entry[1]) => entry[4]
+    end
+end
+function medusa_search_show_progressive(title)
+    parts = split(title)
+    total = length(parts)
+    while total > 0
+        title_part = join(parts[1:total], " ")
+        @debug "Searching medusa for query $title_part"
+        id = medusa_search_show(title_part)
+        isnothing(id) || return id
+        total -= 1
+    end
+    nothing
+end
+
 @doc "Add all watching series to medusa."
 function simkl_to_medusa()
-    watching = simkl_get_shows("watching")
+    anime = Ref(false)
+    watching = simkl_get_shows()
     id = ""
     added = 0
     for item in watching
         try
-            (id, anime) = get_show_id(item["show"])
+            (id, anime[]) = get_show_id(item["show"])
             if !isnothing(id)
-                res = medusa_add_series(id; anime)
+                medusa_add_series(id; anime=anime[])
                 added += 1
                 @debug "Adding $(item["show"]["title"]) to Medusa."
             end
         catch error
             if hasfield(typeof(error), :response)
-                res = JSON.parse(String(error.response.body))
-                get(res, "error", "") === "Series already exist added" || @info res, id, item["show"]["ids"]
+                res1 = JSON.parse(String(error.response.body))
+                if get(res1, "error", "") !== "Series already exist added"
+                    title = item["show"]["title"]
+                    try
+                        id = medusa_search_show_progressive(title)
+                        if isnothing(id)
+                            @info "Search is empty for show $title"
+                            @info res1, id, item["show"]["ids"]
+                        else
+                            @info "Adding $title with $id"
+                            medusa_add_series(id; anime=anime[])
+                        end
+                    catch error
+                        res2 = JSON.parse(String(error.response.body))
+                        @info res1, id, item["show"]["ids"]
+                        @info res2
+                    end
+                end
             else
                 @debug error
             end
@@ -311,7 +379,7 @@ end
 @doc "Remove all medusa series that are not in simkl the watching list."
 function medusa_from_simkl()
     local medusa_shows
-    simkl_shows = simkl_get_shows("watching")
+    simkl_shows = simkl_get_shows()
     simkl_ids = Set{UInt}()
     for show in simkl_shows
         ids = show["show"]["ids"]
@@ -321,7 +389,7 @@ function medusa_from_simkl()
             #     display(ids["imdb"])
             #     display(indexer_id(idpair[1], ids))
             # end
-            push!(simkl_ids, indexer_id(idpair[1], ids))
+            idpair[1] ∈ indexers && push!(simkl_ids, indexer_id(idpair[1], ids))
         end
     end
     @assert !isempty(simkl_ids)
@@ -334,16 +402,16 @@ function medusa_from_simkl()
         ids = show["id"]
         present = false
         for id in ids
-            if indexer_id(id[1], ids) ∈ simkl_ids
+            if id[1] ∈ indexers && indexer_id(id[1], ids) ∈ simkl_ids
                 present = true
                 break
             end
         end
         if !present
-            # display("gotta remove: " * show["title"])
+            display("gotta remove: " * show["title"])
             # display(hash("imdb" => ids["imdb"]))
             # display(ids)
-            medusa_remove_series(show["id"]["slug"])
+            # medusa_remove_series(show["id"]["slug"])
         end
     end
 end
