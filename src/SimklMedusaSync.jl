@@ -201,21 +201,23 @@ function medusa_add_series(id::Pair;
     # this quality means "all the 1080p version"
     quality = Dict("allowed" => [32, 128, 512], "preferred" => []),
     release = Dict("blacklist" => [], "whitelist" => []),
-    lists = ["series"],
+    lists = Dict("0" => "series"),
     anime = false, scene = false,
     # skip past episodes
     status = 5,
     # want future episodes
-    status_after = 3)
+    status_after = 3,
+    rootDir = "/data/shows")
     body = Dict{String,Any}("id" => Dict(id))
     if anime
-        lists = ["anime"]
+        delete!(lists, "0")
+        lists["1"] = "anime"
     end
     body["options"] = Dict("quality" => quality,
         "anime" => anime,
         "status" => status,
         "statusAfter" => status_after,
-        "rootDir" => "/data/shows",
+        "rootDir" => rootDir,
         "subtitles" => true,
         "scene" => scene,
         "seasonFolders" => true,
@@ -246,7 +248,7 @@ function isanime(ids)
     return false
 end
 
-@inline imdb(ids) = "imdb" => split(string(ids["imdb"]), "tt")[2]
+@inline imdb(ids) = "imdb" => string(Meta.parse(split(string(ids["imdb"]), "tt")[2]))
 @inline tvdb(ids) = "tvdb" => ids["tvdb"]
 @inline tmdb(ids) = "tmdb" => ids["tmdb"]
 @inline anidb(ids) = "anidb" => ids["anidb"]
@@ -298,12 +300,12 @@ end
 function medusa_search_show(title)
     query = Dict(
         "query" => title,
-        "indexerId"=> 0
+        "indexerId" => 0
     )
     res = HTTP.request("GET",
         medusa_url[] * "/api/v2/internal/searchIndexersForShowName",
         medusa_headers; query) |>
-    x -> JSON.parse(String(x.body))
+          x -> JSON.parse(String(x.body))
     matches = []
     for show in get(res, "results", Dict())
         # exact show title
@@ -317,7 +319,7 @@ function medusa_search_show(title)
         sort!(matches)
         entry = matches[end][2]
         # Indexer, index
-        return normalize_indexer(entry[1]) => entry[4]
+        return normalize_indexer(entry[1]) => string(entry[4])
     end
 end
 function medusa_search_show_progressive(title)
@@ -333,19 +335,22 @@ function medusa_search_show_progressive(title)
     nothing
 end
 
-@doc "Add all watching series to medusa."
+# Shows which were synced from simkl (watching, planned)
+const simklShows = Set{Pair{String,String}}()
+
 function simkl_to_medusa()
     anime = Ref(false)
     watching = simkl_get_shows()
-    id = ""
-    added = 0
+    id = nothing
+    empty!(simklShows)
     for item in watching
         try
             (id, anime[]) = get_show_id(item["show"])
             if !isnothing(id)
-                medusa_add_series(id; anime=anime[])
-                added += 1
-                @debug "Adding $(item["show"]["title"]) to Medusa."
+                # ignore anime since most animes are season numbered anyway
+                medusa_add_series(convert(Pair{String, String}, id); anime = false)
+                push!(simklShows, id)
+                @info "added $(item["show"]["title"]), $id, $(hash(id)) to Medusa."
             end
         catch error
             if hasfield(typeof(error), :response)
@@ -358,41 +363,47 @@ function simkl_to_medusa()
                             @info "Search is empty for show $title"
                             @info res1, id, item["show"]["ids"]
                         else
-                            @info "Adding $title with $id"
-                            medusa_add_series(id; anime=anime[])
+                            try
+                                res = medusa_add_series(id; anime = false)
+                                push!(simklShows, id)
+                                @info "added $title, $id, $(UInt(hash(id))) to Medusa."
+                            catch error
+                                res = JSON.parse(String(error.response.body))
+                                if get(res1, "error", "") !== "Series already exist added"
+                                    @debug res
+                                else
+                                    push!(simklShows, id)
+                                    @info "added $title, $id, $(UInt(hash(id))) to Medusa."
+                                end
+                            end
                         end
                     catch error
                         res2 = JSON.parse(String(error.response.body))
-                        @info res1, id, item["show"]["ids"]
-                        @info res2
+                        @debug res1, id, item["show"]["ids"]
+                        @debug res2
                     end
+                else
+                    push!(simklShows, id)
+                    @info "added $(item["show"]["title"]), $(id), $(hash(id)) to Medusa."
                 end
             else
                 @debug error
             end
         end
     end
-    @info "Added $added shows to medusa."
+    @info "Added $(length(simklShows)) shows to medusa."
 end
 
 
-@doc "Remove all medusa series that are not in simkl the watching list."
+@doc "Remove all medusa series that were not synced from simkl."
 function medusa_from_simkl()
     local medusa_shows
-    simkl_shows = simkl_get_shows()
-    simkl_ids = Set{UInt}()
-    for show in simkl_shows
-        ids = show["show"]["ids"]
-        for idpair in ids
-            # if "imdb" in keys(ids)
-            #     display("adding " * show["show"]["title"])
-            #     display(ids["imdb"])
-            #     display(indexer_id(idpair[1], ids))
-            # end
-            idpair[1] ∈ indexers && push!(simkl_ids, indexer_id(idpair[1], ids))
-        end
+    @assert (!isempty(simklShows)) "Simkl shows must be synced before medusa cleanup."
+    simkl_ids = Set{UInt64}()
+    for id in simklShows
+        idx = hash(id::Pair{String, String})
+        push!(simkl_ids, idx)
     end
-    @assert !isempty(simkl_ids)
     medusa_shows = medusa_get_shows()
     "error" ∈ medusa_shows && begin
         medusa_auth()
@@ -402,18 +413,24 @@ function medusa_from_simkl()
         ids = show["id"]
         present = false
         for id in ids
-            if id[1] ∈ indexers && indexer_id(id[1], ids) ∈ simkl_ids
-                present = true
-                break
+            if id[1] ∈ indexers
+                # @show id[1], ids[id[1]]
+                idx = indexer_id(id[1], ids)
+                @show show["title"], idx, typeof(idx)
+                if idx ∈ simkl_ids
+                    present = true
+                    break
+                end
             end
         end
         if !present
-            display("gotta remove: " * show["title"])
-            # display(hash("imdb" => ids["imdb"]))
+            # display(show["status"])
+            @info "Removing $(show["title"]), $ids, $([UInt(indexer_id(id[1], ids)) for id in ids])"
             # display(ids)
-            # medusa_remove_series(show["id"]["slug"])
+            medusa_remove_series(show["id"]["slug"])
         end
     end
+    # empty!(simklShows)
 end
 
 function setup()
