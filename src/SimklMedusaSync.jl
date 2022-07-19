@@ -86,17 +86,21 @@ function simkl_auth()
     simkl_set_headers!()
 end
 
-function simkl_query_items(query; type, status, backoff = 0)
+function simkl_query_items(query; type, status, backoff = 0, max_tries = 5)
     sleep(backoff)
     simkl_set_headers!()
     items = nothing
     try
         res = HTTP.request("GET", joinpath(simkl_all_items, type, status), headers; query)
         items = JSON.parse(String(res.body))
-    catch
+    catch e
         backoff = (backoff + 1) * 2
-        @warn "Simkl query failed, retrying after $backoff"
-        items = simkl_query_items(query; type, status, backoff)
+        if max_tries > 0
+            @warn "Simkl query failed, retrying after $backoff \n $e"
+            items = simkl_query_items(query; type, status, backoff, max_tries=(max_tries - 1))
+        else
+            rethrow()
+        end
     end
     items
 end
@@ -148,7 +152,11 @@ function simkl_get_all_items(update = false; reset = nothing, kwargs...)
     first_time = !isfile(items_path[])
     reset = isnothing(reset) ? first_time : reset
     if update || first_time
-        simkl_fetch_all_items(; reset, kwargs...)
+        try
+            simkl_fetch_all_items(; reset, kwargs...)
+        catch
+            JSON.parse(read(items_path[], String))
+        end
     else
         JSON.parse(read(items_path[], String))
     end
